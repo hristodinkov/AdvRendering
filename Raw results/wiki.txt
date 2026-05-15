@@ -1,0 +1,215 @@
+# Topic "Collision detection"
+
+## Research
+
+Collision detection is a process which determines whether a moving object with a collider has come into contact with any other colliders. (Unity Technologies, n.d.) Collision detection is used to provide information to allow interaction between objects and realism in simulations and games. It can be the collisions of an object with the environment or the collisions among multiple sets of objects. (Fabrizio, 2025).
+
+In order to check collisions between objects, I am using the Separating Axis Theorem (SAT). This algorithm is used for detecting intersections between convex shapes. The main idea behind SAT is that two convex objects do not intersect if there is at least one axis onto which their projections do not overlap(Bittle, 2010). SAT is useful for this task because it provides accurate data for the collision between 2 convex meshes. However, it is very expensive computing-wise, because the number of axes that must be tested grows with the number of faces and edges of the shapes involved. For 3D convex objects, SAT requires testing all face normals from both objects, as well as all unique cross‑products between edges of the two shapes (Bittle, 2010). The complexity of this algorithm is O(n*m) per object pair, where n is the number of faces on the first object and m is the number of faces on the second object. 
+
+SAT cannot run alone because the more objects we have to check, the heavier the program becomes. That is why I implemented a spatial hash grid space inside my engine. The grid decreases the number of tests between the objects by dividing the space into cells and maps each cell to a hash table index. Then SAT is checked only between the objects in the same or neighbouring cells. In the paper Optimized Spatial Hashing for Collision Detection of Deformable Objects(Teschner et al., 2003) is shown how spatial hashing can reduce collision detection from O(n*m) to O(n) by ensuring each object only checks against a small local neighbourhood. A cell size that is too large increases the number of objects stored in each cell, while a cell size that is too small increases the number of cells that must be visited.
+
+For this assignment, I am implementing a collision detection system in my custom engine built with OpenGL(LearnOpenGL - Introduction, n.d.), and I will optimise it by including a spatial hash grid so I can decrease the number of SAT tests between the objects(Teschner et al., 2003).
+
+**References:** <br>
+* Unity Technologies. (n.d.). Glossary. Unity User Manual (Version 6000.3). Retrieved May 10, 2026, from <br>
+https://docs.unity3d.com/6000.3/Documentation/Manual/Glossary.html#collisiondetection
+
+* Fabrizio, J. (2025). EASY REAL-TIME COLLISION DETECTION. Arxiv.org. Retrieved May 10, 2026, from <br>
+https://arxiv.org/html/2406.00026v1
+
+* LearnOpenGL - Introduction. (n.d.). Learnopengl.com. Retrieved May 10, 2026, from <br>
+https://learnopengl.com/Introduction
+
+* Teschner, M., Heidelberger, B., Müller, M., Pomeranets, D., & Gross, M. (2003). Optimized spatial hashing for collision detection of deformable objects. In Proceedings of Vision, Modeling, and Visualization (VMV 2003) (pp. 563–572). ETH Zurich Computer Graphics Laboratory. Retrieved May 10, 2026, from <br>
+https://cgl.ethz.ch/Downloads/Publications/Papers/2003/Tes03/Tes03.pdf
+
+* Bittle, W. (2010). SAT (Separating Axis Theorem). Dyn4j. <br>
+https://dyn4j.org/2010/01/sat/#sat-intro
+
+## Implementation
+
+### Separating Axis Theorem (SAT)
+When the grid identifies the potential pairs, I run SAT test to determine whether two convex meshes collide. As I mentioned earlier SAT works by projecting both objects onto a set of axes. If any axis shows a gap between projections, the objects do not collide. 
+
+#### 1. Collecting face normals
+Each triangle adds one axis
+```C++
+const auto& normalsA = A.getFaceNormals();
+    for (const glm::vec3& normal : normalsA) {
+        if (glm::length(normal) > 0.0001f) {
+            axes.push_back(glm::normalize(normal));
+        }
+    }
+```
+#### 2.Collecting edge cross-product axes
+For 3D SAT, edge–edge cross products are required:
+```C++
+for (const auto& eA : edgesA)
+    {
+        glm::vec3 a0 = A.worldVertices[eA.first];
+        glm::vec3 a1 = A.worldVertices[eA.second];
+        glm::vec3 edgeA = a1 - a0;
+
+        for (const auto& eB : edgesB)
+        {
+            glm::vec3 b0 = B.worldVertices[eB.first];
+            glm::vec3 b1 = B.worldVertices[eB.second];
+            glm::vec3 edgeB = b1 - b0;
+
+            glm::vec3 axis = glm::cross(edgeA, edgeB);
+
+            if (glm::length(axis) > 0.0001f)
+            {
+                axes.push_back(glm::normalize(axis));
+            }
+        }
+    }
+```
+#### 3. Projecting onto each axis
+```C++
+void ConvexCollider::project(const glm::vec3& axis, float& outMin, float& outMax) const
+{
+    float first = glm::dot(worldVertices[0], axis);
+    outMax = outMin = first;
+    
+    for (const auto& worldVertex : worldVertices) {
+        float p = glm::dot(worldVertex, axis);
+        outMin = std::min(outMin, p);
+        outMax = std::max(outMax, p);
+    }
+}
+```
+#### 4. Checking for separation
+If any axis separates the objects, they are not colliding:
+```C++
+if (maxA < minB || maxB < minA)
+    return false;
+```
+If all axes overlap, there is a collision.
+
+To visually mark if two objects are colliding, I am turning them red. If they are not colliding, they remain green.
+```C++
+if (SATCollision(A, B)) {
+    object.color = glm::vec3(1, 0, 0);
+} else {
+    object.color = glm::vec3(0, 1, 0); 
+}
+
+```
+![NoGridCollision](https://github.com/hristodinkov/AdvRendering/blob/main/Graphs%20and%20Images/cubes_noGrid.gif)
+
+### Spatial Hash Grid
+To avoid the O(n*m) cost of checking every object against every other object, I implemented a uniform spatial hash grid. Each object is inserted into one or more grid cells based on its world‑space position.
+#### Transforming from world to cell coordinates
+```C++
+SpatialHashGrid::CellCoord SpatialHashGrid::toCell(const glm::vec3 &pos) const {
+    return {
+        (int) std::floor(pos.x/cellSize),
+        (int) std::floor(pos.y/cellSize),
+        (int) std::floor(pos.z/cellSize)
+    };
+}
+```
+#### Hashing 3D cell coordinates
+I use the same prime-based hashing as in Optimized Spatial Hashing for Collision Detection of Deformable Objects.(Teschner et al., 2003)
+``` C++
+struct CellCoordHash {
+        size_t operator()(const CellCoord& c) const {
+            return (size_t)(
+                c.i * 73856093 ^
+                c.j * 19349663 ^
+                c.k * 83492791
+            );
+        }
+    };
+```
+#### Inserting objects into the grid
+Each object computes which grid cells its vertices occupy.
+Objects in the same or neighbouring cells are considered potential collision pairs.
+```C++
+for (auto& [coord, objects] : table) {
+        for (auto& off : neighborOffsets) {
+            CellCoord neighbor = {coord.i+off.i, coord.j+off.j, coord.k+off.k};
+
+            if (!table.contains(neighbor)) {
+                continue;
+            }
+
+            auto& others = table[neighbor];
+
+            for (auto* A : objects) {
+                for (auto* B : others) {
+                    if (A<B) {
+                        pairs.emplace_back(A,B);
+                    }
+                }
+            }
+        }
+    }
+```
+![GridCollision](https://github.com/hristodinkov/AdvRendering/blob/main/Graphs%20and%20Images/cubes_withGrid.gif)
+**References:** <br>‌
+* Teschner, M., Heidelberger, B., Müller, M., Pomeranets, D., & Gross, M. (2003). Optimized spatial hashing for collision detection of deformable objects. In Proceedings of Vision, Modeling, and Visualization (VMV 2003) (pp. 563–572). ETH Zurich Computer Graphics Laboratory. Retrieved May 10, 2026, from <br>
+https://cgl.ethz.ch/Downloads/Publications/Papers/2003/Tes03/Tes03.pdf
+
+## Benchmarking Tool
+The benchmarking tool in my engine is designed to measure the performance of the collision detection system under different settings. It allows you to control the number of objects in the scene, the type of objects inside the scene, the cell size of the grid, enabling/disabling the hash grid, and turning on and off the rendering of the camera. This ensures that each test runs under the same conditions and can remove the rendering part from the engine to focus more on collision-connected performance.
+
+During each frame of a benchmark run, the program records several metrics:
+* Time
+* Current frame of record
+* FPS recorded for this frame
+* The number of SAT tests this frame
+* How much time does the engine need to perform all of the SAT tests this frame
+* The label of the test
+* Number of objects
+* Variable that stores whether the grid was turned on: 0 - false, 1 - true
+* The seed on which the test was performed.
+
+The benchmark runs for a fixed number of frames, ensuring that each configuration is tested for the same duration regardless of FPS. The tool also uses a fixed random seed when spawning objects, so each benchmark configuration uses the same object positions, making comparisons fair and reproducible.
+
+At the end of the run, the tool outputs all collected samples into a CSV file. The CSV contains one row per frame, in the following format:
+```CSV
+label,objects,useGrid,seed,time,frame,fps,frameTime,satTests,satTime
+```
+This data is later used to generate graphs and compare the performance of SAT alone versus SAT combined with the spatial hash grid.
+
+## Test and Analysis
+
+The following tests were conducted on a fixed hardware setup (Victus by HP Gaming Laptop 16, AMD Ryzen 7 7840HS, NVIDIA GeForce RTX 4060 Laptop GPU, 32GB RAM) with only the engine running to minimise external interference. All tests used a fixed random seed (47) to ensure identical object spawn positions, axes of movement and phase offsets across every setting. Each test recorded 200 frames using a fixed timestep of 1/60s to guarantee that every object movement is the same regardless of actual frame rate. The baseline for all comparisons is the no-grid test, where every object is tested against every other object using SAT directly.
+
+### Figure 1 — Frame Time vs Object Count (Grid vs No Grid)
+![Figure 1](https://github.com/hristodinkov/AdvRendering/blob/main/Graphs%20and%20Images/FrameTimeVsObjCount.png)
+
+As seen in Figure 1, the frame time grows significantly faster without the grid as the object count increases. At 10 objects, the difference between grid with a cell size of 10 and no-grid is minimal for both shapes. Tetrahedrons take 0.0022s without the grid versus 0.0007s with it, and cubes take 0.0098s versus 0.0006s. However, the gap becomes bigger at higher object counts. At 500 objects, tetrahedrons without the grid take 3.1629s per frame compared to just 0.0188s with the grid. For cubes, the no-grid test crashed at 500 objects, while the grid with a cell size of 10 handled it at 0.1143s per frame, demonstrating that the grid is not just an optimisation but a requirement for scenes with a lot of 3D convex shapes.
+
+The logarithmic scale reveals that both no-grid lines grow in a curve consistent with O(n²) behaviour. Doubling the object count roughly quadruples the frame time. By contrast, the grid lines rose more slowly, making a linear growth. The crossover point where the grid becomes dramatically beneficial is visible between 10 and 50 objects. At 10 objects, the grid already outperforms the no-grid test, but the difference grows exponentially as object count increases. At 500 objects, the grid is around 168 times faster for tetrahedrons, and for cubes, the no-grid test crashed while the grid handled it without any issues.
+
+### Figure 2 — SAT Tests vs Object Count (Grid vs No Grid)
+![Figure 2](https://github.com/hristodinkov/AdvRendering/blob/main/Graphs%20and%20Images/SATTestsVSObjCountGridvsNoGrid.png)
+
+Figure 2 proves the Big-O notation complexity of both approaches. The no-grid SAT test count follows the formula n(n−1)/2, which is O(n²). At 10 objects, there are 45 tests, at 100, there are 4950 tests, and at 500, there are 124750. This confirms that the no-grid implementation checks every possible pair every frame. The grid reduces this dramatically. At 500 objects with cellSize=10, tetrahedrons require only 488 SAT tests per frame and cubes require 482. This is a reduction of over 99.6% compared to the baseline. 
+
+Overall, the near-flat growth of the grid lines on a logarithmic scale confirms the O(n) behaviour described in the research paper of Teschner,M. (Teschner et al., 2003). Each object only checks against its local neighbourhood, regardless of total scene size.
+
+### Figure 3 - Accuracy vs Cell Size (500 objects)
+![Figure 3](https://github.com/hristodinkov/AdvRendering/blob/main/Graphs%20and%20Images/AccuracyVSCellSizeCollisionsDetectedAndFrameTime.png)
+
+Figure 3 reveals a clear trade-off between performance and accuracy as cell size changes. The frame time lines (right axis) increase steadily as cell size grows larger, since larger cells contain more objects and therefore generate more candidate pairs to test with SAT. This confirms that smaller cells are faster but only up to a point.
+
+The critical finding is the accuracy threshold visible at cellSize=1 and cellSize=5 for cubes. At cellSize=1 both shapes lose the majority of their collisions. Tetrahedrons drop to 0.322 average collisions and cubes to 1.221, compared to their baselines of 2.849 and 7.709, respectively. This happens because the cells are so small that objects span multiple cells, and their neighbours are not included in the 3×3×3 neighbourhood check. At cellSize=5 tetrahedrons recover to 2.819 (98.9% accuracy), but cubes only reach 3.945 (51.2% accuracy), because cubes have larger geometry and still span cell boundaries at that size.
+
+From cellSize=10 onwards, both shapes reach full accuracy. Tetrahedrons at 2.809 and cubes at 7.377, both within 5% accuracy of the baseline. This confirms that cellSize=10 is the optimal configuration for this scene, delivering both correct collision detection and the best frame time among accurate configurations. This finding is consistent with the recommendation from the research paper of Teschner,M. (Teschner et al., 2003) that the cell size should be at least as large as the average object diameter to avoid missing cross-boundary collisions.
+
+## Trade-offs and Future Improvements
+
+The main trade-off of the spatial hash grid is that cell size must be tuned per scene. A cell size that works well for small objects like tetrahedrons may fail for larger objects like cubes, as demonstrated in Figure 3. A future improvement would be to automatically compute the cell size based on the average or maximum object bounding box at scene load time, removing the need for manual tuning.
+
+Additionally, the current implementation maps each object to a single cell based on its centre position. Objects that span multiple cells are therefore only registered in one cell, which causes the missed collisions at small cell sizes. A more robust approach would be to insert each object into all cells its bounding box overlaps, at the cost of higher memory usage and more duplicate pair checks.
+
+Finally, a remaining limitation of the current system is that all tests were performed in scenes where objects were evenly spread out. Real game scenes rarely behave this way. It is more often that objects cluster together in certain areas, creating local hotspots where many collisions happen at once. These crowded regions can temporarily increase the workload of the grid and reduce its efficiency. Future testing should therefore include scenes with both evenly spaced and clustered objects to better understand how the system behaves under more realistic conditions.
+
+**References:** <br>
+
+* Teschner, M., Heidelberger, B., Müller, M., Pomeranets, D., & Gross, M. (2003). Optimized spatial hashing for collision detection of deformable objects. In Proceedings of Vision, Modeling, and Visualization (VMV 2003) (pp. 563–572). ETH Zurich Computer Graphics Laboratory. Retrieved May 10, 2026, from <br>
+https://cgl.ethz.ch/Downloads/Publications/Papers/2003/Tes03/Tes03.pdf
